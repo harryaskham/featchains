@@ -2,9 +2,11 @@
 
 module Main where
 
-import Lib
+import Lib ( someFunc )
+import qualified Data.Text as T
+import Data.Text (Text(..))
 
-clientId :: Text
+clientId :: T.Text
 clientId = "28342f3712b74711af0f925204a8aae1"
 
 clientSecret :: Text

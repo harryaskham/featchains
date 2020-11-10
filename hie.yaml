@@ -1,0 +1,13 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:featchains"
+
+    - path: "app/Main.hs"
+      component: "featchains:exe:featchains-exe"
+
+    - path: "app/Paths_featchains.hs"
+      component: "featchains:exe:featchains-exe"
+
+    - path: "test"
+      component: "featchains:test:featchains-test"

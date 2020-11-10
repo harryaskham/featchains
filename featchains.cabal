@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 0ca662a285cbd8e56d3b08861da8a4ba57e902bdcf383bbb0091065cbfe00481
+-- hash: 32a4eb6da7d08d8ab4e4f56d1d1d88b1ea253ae375a6be64246b31955a476987
 
 name:           featchains
 version:        0.1.0.0
@@ -34,6 +34,7 @@ library
       src
   build-depends:
       base >=4.7 && <5
+    , text
   default-language: Haskell2010
 
 executable featchains-exe
@@ -46,6 +47,7 @@ executable featchains-exe
   build-depends:
       base >=4.7 && <5
     , featchains
+    , text
   default-language: Haskell2010
 
 test-suite featchains-test
@@ -59,4 +61,5 @@ test-suite featchains-test
   build-depends:
       base >=4.7 && <5
     , featchains
+    , text
   default-language: Haskell2010
