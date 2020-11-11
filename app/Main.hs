@@ -9,6 +9,8 @@ import Data.Maybe ( catMaybes )
 import qualified Data.Sequence as SQ
 import qualified Data.Set as S
 import qualified Data.Text as T
+import Control.Concurrent.MVar
+    ( newMVar, putMVar, readMVar, takeMVar, MVar )
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.Encoding  as LE
 import qualified Data.Text.Encoding  as E
@@ -20,7 +22,7 @@ import Control.Monad.State
       MonadState(get),
       StateT(runStateT),
       gets,
-      modify )
+      evalStateT )
 import Network.Wreq
     ( getWith,
       postWith,
@@ -36,6 +38,7 @@ import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
 import Control.Lens
     ( (&), (^.), view, (.~), over, set, makeLenses )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
+import Control.Concurrent ( threadDelay, forkIO )
 
 {- TODO
 Fetch song info
@@ -138,17 +141,20 @@ instance FromJSON Artist where
 -- Right now returns up to 50 tracks
 -- Remixes will mess up the stats
 getArtistTracks :: Token -> Artist -> IO TrackList
-getArtistTracks token (Artist _ (ArtistName name)) = do
-  let offsets = [0]
-  r <- traverse (search token ("artist:" <> name) "track" 50) offsets
-  let parseR r = case r ^. responseStatus . statusCode of
-                   200 -> case decode $ r ^. responseBody of
-                                Just tl -> Just tl
-                                Nothing -> error "Invalid body"
-                   404 -> Nothing
-                   _ -> error "Unexpected status code"
-      tls = catMaybes $ parseR <$> r
-  return $ foldl' (<>) (TrackList []) tls
+getArtistTracks token artist@(Artist _ (ArtistName name)) = do
+  r <- search token ("artist:" <> name) "track" 50 0
+  case r ^. responseStatus . statusCode of
+    -- Success - parse the body
+    200 -> case decode $ r ^. responseBody of
+             Just tl -> return tl
+             Nothing -> error "Invalid body"
+    -- No results for query / no more songs
+    404 -> return (TrackList [])
+    -- Need to rate-limit, retry after a second
+    429 -> do
+      threadDelay 1000000
+      getArtistTracks token artist
+    _ -> error "Unexpected status code"
 
 -- Extract the unique artists from a tracklist
 uniqueArtists :: TrackList -> S.Set Artist
@@ -173,39 +179,64 @@ getCollaborations token artist = do
 getCollaborators :: Collaboration -> [Artist]
 getCollaborators (Collaboration a1 a2 _) = [a1, a2]
 
-data Scraper = Scraper { _queue :: SQ.Seq Artist
-                       , _collaborations :: SQ.Seq Collaboration
+data Scraper = Scraper { _queue :: MVar (SQ.Seq Artist)
+                       , _collaborations :: MVar (SQ.Seq Collaboration)
+                       , _done :: MVar (S.Set Artist)
+                       , _seen :: MVar (S.Set Artist)
                        , _token :: Token
-                       , _done :: S.Set Artist
-                       , _seen :: S.Set Artist
                        }
 makeLenses ''Scraper
 
--- TODO: Parallelise
 stepScraper :: StateT Scraper IO ()
 stepScraper = do
+  -- Pull out useful state
   s <- get
-  case SQ.viewl $ s ^. queue of
+  qM <- gets (view queue)
+  doneM <- gets (view done)
+  seenM <- gets (view seen)
+  collaborationsM <- gets (view collaborations)
+
+  -- Block for access to the queue
+  q <- liftIO $ takeMVar qM
+
+  -- We got the queue handle, proceed
+  case SQ.viewl q of
     a SQ.:< q -> do
+      -- Return the queue handle before doing useful work with the artist
+      -- This is what enables multiple workers to do IO at same time
+      liftIO $ putMVar qM q
+
       -- Pull all collaborative tracks for this artist
       cs <- liftIO $ getCollaborations (s ^. token) a
-      -- Track that we scraped this artist
-      modify (over done (S.insert a))
-      -- Keep track of the collaborations we found
-      modify (over collaborations ((SQ.fromList cs) SQ.><))
+
+      -- Track that we scraped this artist, locking on done
+      done <- liftIO $ takeMVar doneM
+      liftIO $ putMVar doneM (S.insert a done)
+
+      -- Keep track of the collaborations we found, locking
+      collaborations <- liftIO $ takeMVar collaborationsM
+      liftIO $ putMVar collaborationsM (collaborations SQ.>< (SQ.fromList cs))
+
       -- Get collaborators that we haven't already scraped
-      let newAs = nub $ filter (not . (`S.member` (s ^. seen))) (concatMap getCollaborators cs)
       -- Add all new artists to the seen set so that the queue doesn't have duplicates
-      modify (over seen $ \acc -> foldl' (flip S.insert) acc newAs)
-      -- Add collaborators to queue for scraping
-      modify (set queue $ q SQ.>< (SQ.fromList newAs))
-    SQ.EmptyL -> return ()
+      seen <- liftIO $ takeMVar seenM
+      let newAs = nub $ filter (not . (`S.member` seen)) (concatMap getCollaborators cs)
+      liftIO $ putMVar seenM (foldl' (flip S.insert) seen newAs)
+
+      -- Add collaborators to queue for scraping, locking the queue again
+      q <- liftIO $ takeMVar qM
+      liftIO $ putMVar qM (q SQ.>< (SQ.fromList newAs))
+    SQ.EmptyL -> do
+      -- Still need to reinstate queue state here
+      liftIO $ putMVar qM q
+
+      return ()
 
 logScraper :: StateT Scraper IO ()
 logScraper = do
-  q <- gets (view queue)
-  cs <- gets (view collaborations)
-  done <- gets (view done)
+  q <- gets (view queue) >>= (liftIO . readMVar)
+  cs <- gets (view collaborations) >>= (liftIO . readMVar)
+  done <- gets (view done) >>= (liftIO . readMVar)
   case SQ.viewl q of
     (Artist _ (ArtistName name)) SQ.:< _ -> liftIO $ putStrLn $ "Next Artist: " <> show name
     SQ.EmptyL -> liftIO $ putStrLn "No next artist"
@@ -214,13 +245,20 @@ logScraper = do
   liftIO $ putStrLn $ "Artists scraped: " <> show (S.size done)
 
 runScraper :: StateT Scraper IO ()
-runScraper = do
-  logScraper
+runScraper = stepScraper >> runScraper
+  -- Log progress every second
   -- _ <- liftIO getLine
-  s <- get
-  if SQ.null (s ^. queue)
-     then return ()
-     else stepScraper >> runScraper
+  -- s <- get
+  -- q <- gets (view queue) >>= (liftIO . readMVar)
+  -- if SQ.null q
+  --    then return ()
+  --    else stepScraper >> runScraper
+
+scraperLogger :: Scraper -> IO ()
+scraperLogger scraper = do
+  evalStateT logScraper scraper
+  threadDelay 1000000
+  scraperLogger scraper
 
 main :: IO ()
 main = do
@@ -228,13 +266,19 @@ main = do
   token <- getToken secret
   print token
   let jam = Artist (ArtistId "6ST2sHlQoWYjxkIVnuW2mr") (ArtistName "Jam Baxter")
-      scraper = Scraper { _queue = SQ.singleton jam
-                        , _collaborations = SQ.empty
+  queueM <- newMVar $ SQ.singleton jam
+  collaborationsM <- newMVar SQ.empty
+  doneM <- newMVar S.empty
+  seenM <- newMVar S.empty
+  let scraper = Scraper { _queue = queueM
+                        , _collaborations = collaborationsM
+                        , _done = doneM
+                        , _seen = seenM
                         , _token = token
-                        , _done = S.empty
-                        , _seen = S.empty
                         }
-  (_, finalScraper) <- runStateT runScraper scraper
-  print "done"
-
-pc (Collaboration (Artist _ (ArtistName n1)) (Artist _ (ArtistName n2)) (Track _ (TrackName tn) _)) = (n1, n2, tn)
+  forkIO $ evalStateT runScraper scraper
+  forkIO $ evalStateT runScraper scraper
+  forkIO $ evalStateT runScraper scraper
+  forkIO $ evalStateT runScraper scraper
+  forkIO $ evalStateT runScraper scraper
+  scraperLogger scraper
