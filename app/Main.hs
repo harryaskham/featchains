@@ -18,7 +18,7 @@ import Network.Wreq
       param,
       responseBody,
       FormParam((:=)) )
-import Data.Aeson
+import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
 import Control.Lens ( (&), (^.), (.~) )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
 
@@ -46,12 +46,15 @@ clientSecret = do
 apiUri :: String
 apiUri = "https://api.spotify.com/v1"
 
+-- Wrapper type for the API token we'll use
 newtype Token = Token T.Text deriving (Eq, Show)
 
 instance FromJSON Token where
   parseJSON = withObject "Token" $ \v -> Token <$> v .: "access_token"
 
 -- Get a client OAuth token
+-- Needs to concat ID and secret, base64 encoded
+-- Pulls the token out of the JSON response
 getToken :: T.Text -> IO Token
 getToken secret = do
   let tokenUri = "https://accounts.spotify.com/api/token"
