@@ -17,6 +17,7 @@ import qualified Data.Text.Encoding  as E
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as LBC
+import Database.PostgreSQL.Simple
 import Control.Monad ( replicateM_ )
 import Control.Monad.State
     ( MonadIO(liftIO),
@@ -41,32 +42,6 @@ import Control.Lens
     ( (&), (^.), view, (.~), over, set, makeLenses )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
 import Control.Concurrent ( threadDelay, forkIO )
-
-{- TODO
-Fetch song info
-Figure out collaborators representation
-Artist is name + ID
-Write BFS graph scraper
-Define data model
-Scrape + persist graph
-Look at graphDB options
-Build graph inmem
-On the fly bfs / dfs
-All-pairs caching?
-artistname sometimes has semicolons; ampersands, etc
-
-SCRAPER
-=======
-pick a seed artist
-get all songs
-filter to those with feats or collabs
-add edges between artists
-mark original as done
-add collabs to queue for the same
-parallelisation might be wasteful when building the graph
-so we need artist-level locks, only one thread can be doing one artist at once
-simple artist-request caching should be sufficient as long as all threads can access it
--}
 
 clientId :: T.Text
 clientId = "28342f3712b74711af0f925204a8aae1"
@@ -189,6 +164,7 @@ data Scraper = Scraper { _queue :: MVar (SQ.Seq Artist)
                        , _done :: MVar (S.Set Artist)
                        , _seen :: MVar (S.Set Artist)
                        , _token :: Token
+                       , _conn :: Connection
                        }
 makeLenses ''Scraper
 
@@ -231,10 +207,27 @@ stepScraper = do
       -- Add collaborators to queue for scraping, locking the queue again
       q <- liftIO $ takeMVar qM
       liftIO $ putMVar qM (q SQ.>< (SQ.fromList newAs))
+
+      -- Now handle database writes before moving on in key-satisfying order:
+      -- Need to write the artist we just got and all other new artists
+      let artistToTuple (Artist (ArtistId aId) (ArtistName aName)) = (aId, aName)
+      _ <- liftIO
+        $ executeMany (s ^. conn) "insert into artist (artist_id, artist_name) values (?, ?) on conflict do nothing"
+        $ (nub $ artistToTuple <$> (a:newAs))
+
+      -- Then the tracks
+      let collaborationToTrackTuple (Collaboration _ _ (Track (TrackId tId) (TrackName tName) _)) = (tId, tName)
+      _ <- liftIO $ executeMany (s ^. conn) "insert into track (track_id, track_name) values (?, ?) on conflict do nothing"
+        $ (nub $ collaborationToTrackTuple <$> cs)
+
+      -- Then the collaborations
+      let collaborationToTuple (Collaboration (Artist (ArtistId aId1) _) (Artist (ArtistId aId2) _) (Track (TrackId tId) _ _)) = (aId1, aId2, tId)
+      _ <- liftIO $ executeMany (s ^. conn) "insert into collaboration (first_artist_id, second_artist_id, track_id) values (?, ?, ?) on conflict do nothing"
+        $ (nub $ collaborationToTuple <$> cs)
+      return ()
     SQ.EmptyL -> do
       -- Still need to reinstate queue state here
       liftIO $ putMVar qM q
-
       return ()
 
 logScraper :: StateT Scraper IO ()
@@ -264,6 +257,11 @@ scraperLogger scraper = do
 
 main :: IO ()
 main = do
+  -- DB init
+  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
+                                     , connectPassword = "postgres"
+                                     }
+
   -- Get OAuth token
   secret <- clientSecret
   token <- getToken secret
@@ -279,6 +277,7 @@ main = do
                         , _done = doneM
                         , _seen = seenM
                         , _token = token
+                        , _conn = conn
                         }
 
   -- Kick off N workers

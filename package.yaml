@@ -29,6 +29,7 @@ dependencies:
 - lens
 - base64
 - mtl
+- postgresql-simple
 
 library:
   source-dirs: src
