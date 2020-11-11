@@ -180,6 +180,7 @@ data Scraper = Scraper { _queue :: SQ.Seq Artist
                        , _collaborations :: SQ.Seq Collaboration
                        , _token :: Token
                        , _done :: S.Set Artist
+                       , _seen :: S.Set Artist
                        }
 makeLenses ''Scraper
 
@@ -195,7 +196,9 @@ stepScraper = do
       -- Keep track of the collaborations we found
       modify (over collaborations ((SQ.fromList cs) SQ.><))
       -- Get collaborators that we haven't already scraped
-      let newAs = nub $ filter (not . (`S.member` (s ^. done))) (getCollaborator <$> cs)
+      let newAs = nub $ filter (not . (`S.member` (s ^. seen))) (getCollaborator <$> cs)
+      -- Add all new artists to the seen set so that the queue doesn't have duplicates
+      modify (over seen $ \acc -> foldl' (flip S.insert) acc newAs)
       -- Add collaborators to queue for scraping
       modify (set queue $ q SQ.>< (SQ.fromList newAs))
     SQ.EmptyL -> return ()
@@ -231,6 +234,7 @@ main = do
                         , _collaborations = SQ.empty
                         , _token = token
                         , _done = S.empty
+                        , _seen = S.empty
                         }
   (_, finalScraper) <- runStateT runScraper scraper
   print "done"
