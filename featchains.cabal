@@ -4,16 +4,16 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: dbd40efe8744eaef1385a4f94281b79bfe787fd8e786b3e2cce3dc874d83e037
+-- hash: 2aa8fb1b5fd7d4057b2dc7d557b572d68f36fd5ed1e818698e4b0e39718292b0
 
 name:           featchains
 version:        0.1.0.0
 description:    Please see the README on GitHub at <https://github.com/githubuser/featchains#readme>
-homepage:       https://github.com/githubuser/featchains#readme
-bug-reports:    https://github.com/githubuser/featchains/issues
-author:         Author name here
-maintainer:     example@example.com
-copyright:      2020 Author name here
+homepage:       https://github.com/harryaskham/featchains#readme
+bug-reports:    https://github.com/harryaskham/featchains/issues
+author:         Harry Askham
+maintainer:     harry@askham.ai
+copyright:      2020 Harry Askham
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple
@@ -23,7 +23,7 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/githubuser/featchains
+  location: https://github.com/harryaskham/featchains
 
 library
   exposed-modules:
@@ -34,6 +34,7 @@ library
       src
   build-depends:
       aeson
+    , array
     , base >=4.7 && <5
     , base64
     , bytestring
@@ -54,6 +55,7 @@ executable featchains-exe
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
+    , array
     , base >=4.7 && <5
     , base64
     , bytestring
@@ -76,6 +78,7 @@ test-suite featchains-test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
+    , array
     , base >=4.7 && <5
     , base64
     , bytestring

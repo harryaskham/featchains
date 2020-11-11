@@ -30,6 +30,7 @@ dependencies:
 - base64
 - mtl
 - postgresql-simple
+- array
 
 library:
   source-dirs: src

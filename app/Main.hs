@@ -1,14 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+
 
 module Main where
 
 import Data.List ( foldl', nub )
 import Data.Maybe ( catMaybes )
+import GHC.Generics (Generic)
+import Data.Graph
+import Data.Array
 import qualified Data.Sequence as SQ
 import qualified Data.Set as S
 import qualified Data.Text as T
+import qualified Data.Map.Strict as M
 import Control.Concurrent.MVar
     ( newMVar, putMVar, readMVar, takeMVar, MVar )
 import qualified Data.Text.Lazy as LT
@@ -18,11 +26,8 @@ import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as LBC
 import Database.PostgreSQL.Simple
-    ( executeMany,
-      connect,
-      defaultConnectInfo,
-      ConnectInfo(connectDatabase, connectPassword),
-      Connection )
+import Database.PostgreSQL.Simple.FromField
+import Database.PostgreSQL.Simple.SqlQQ
 import Control.Monad ( replicateM_ )
 import Control.Monad.State
     ( MonadIO(liftIO),
@@ -262,8 +267,8 @@ scraperLogger scraper = do
   threadDelay 1000000
   scraperLogger scraper
 
-main :: IO ()
-main = do
+scraperMain :: IO ()
+scraperMain = do
   -- DB init
   conn <- connect defaultConnectInfo { connectDatabase = "featchains"
                                      , connectPassword = "postgres"
@@ -292,3 +297,110 @@ main = do
 
   -- Block on the logger thread
   scraperLogger scraper
+
+graphMain :: IO ()
+graphMain = do
+  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
+                                     , connectPassword = "postgres"
+                                     }
+  -- Some convenience lookups
+  idToArtist <-
+    M.fromList
+    <$> (query_ conn [sql| select artist_id, artist_name from artist|] :: (IO [(T.Text, T.Text)]))
+  let artistToId = M.fromList $ (\(k, v) -> (v, k)) <$> M.toList idToArtist
+  idToTrack <-
+    M.fromList
+    <$> (query_ conn [sql| select track_id, track_name from track|] :: (IO [(T.Text, T.Text)]))
+
+  print "Querying..."
+  rows <-
+    query_ conn
+    $ [sql| select distinct
+              first_artist_id,
+              first_artist_name,
+              second_artist_id,
+              artist_name as second_artist_name,
+              track_id,
+              track_name
+            from (
+              select
+                first_artist_id,
+                artist_name as first_artist_name,
+                second_artist_id,
+                track_id,
+                track_name
+              from (
+                select
+                  first_artist_id,
+                  second_artist_id,
+                  track.track_id,
+                  track_name
+                from
+                  collaboration
+                inner join track on collaboration.track_id=track.track_id
+              ) as mid inner join artist on mid.first_artist_id=artist.artist_id
+            ) as mid2 inner join artist on mid2.second_artist_id=artist.artist_id
+            limit 100000000000
+      |] :: (IO [(T.Text, T.Text, T.Text, T.Text, T.Text, T.Text)])
+
+  print $ T.pack (show (M.size idToArtist)) <> " artists"
+  print $ T.pack (show (M.size idToTrack)) <> " tracks"
+  print $ T.pack (show $ length rows) <> " edges"
+
+  print "Building graph and lookups"
+
+  -- Have a way to "label" vertices by the list of tracks that link the artists
+  let rowToEdgeLookup (aId1, aName1, aId2, aName2, tId, tName) = ((aId1, aId2), [(tId, tName)])
+      edgeLookup = M.fromListWith (++) $ rowToEdgeLookup <$> rows
+
+  -- Convert into graph form with nodes being names, IDs being IDs
+  -- Need to get a lookup map from ID to all things it's connected to
+  let rowToEdges (aId1, aName1, aId2, aName2, tId, tName) = [ (aId1, [aId2])
+                                                            , (aId2, [aId1])
+                                                            ]
+      adjacencyMap = M.fromListWith (++) (concatMap rowToEdges rows)
+      edgeList = (\(aId1, toIds) -> (aId1, aId1, toIds)) <$> M.toList adjacencyMap
+      (graph, nodeFromVertex, vertexFromKey) = graphFromEdges edgeList
+
+  print $ take 10 $ vertices graph
+  print $ take 10 $ edges graph
+
+  -- See if we can find simple paths
+  let a1Name = "Kano" :: T.Text
+      a2Name = "Rihanna" :: T.Text
+      (Just a1Id) = M.lookup a1Name artistToId
+      (Just a2Id) = M.lookup a2Name artistToId
+      (Just a1V) = vertexFromKey a1Id
+      (Just a2V) = vertexFromKey a2Id
+  print $ "Is there a path from " <> a1Name <> " to " <> a2Name <> ": " <> T.pack (show (path graph a1V a2V))
+
+  -- Who did MM collaborate with?
+  -- Whoops reachable is .. the whole set.
+  -- print $ take 10 names
+
+  let fst3 (a, _, _) = a
+  let path = case graphBfs graph a1V a2V of
+               Just path -> catMaybes $ (flip M.lookup $ idToArtist) . fst3 . nodeFromVertex <$> path
+               Nothing -> []
+  print path
+
+-- BFS between two nodes, returns the path if there is one
+graphBfs :: Graph -> Vertex -> Vertex -> Maybe [Vertex]
+graphBfs graph start end = go graph end S.empty [] (SQ.singleton start)
+  where
+    go graph end visited path q =
+      case SQ.viewl q of
+        (current SQ.:< queue) ->
+          let newVisited = S.insert current visited
+              neighbours = filter (not . (`S.member` newVisited)) (graph ! current)
+              newQueue = queue SQ.>< SQ.fromList neighbours
+              newPath = current:path
+           in if current == end
+              then Just $ reverse (current:path)
+              else go graph end newVisited newPath newQueue
+        SQ.EmptyL -> Nothing
+
+main :: IO ()
+main = do
+  -- scraperMain
+  graphMain
