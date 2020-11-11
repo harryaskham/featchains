@@ -1,10 +1,10 @@
 name:                featchains
 version:             0.1.0.0
-github:              "githubuser/featchains"
+github:              "harryaskham/featchains"
 license:             BSD3
-author:              "Author name here"
-maintainer:          "example@example.com"
-copyright:           "2020 Author name here"
+author:              "Harry Askham"
+maintainer:          "harry@askham.ai"
+copyright:           "2020 Harry Askham"
 
 extra-source-files:
 - README.md
