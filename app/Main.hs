@@ -156,25 +156,22 @@ uniqueArtists (TrackList tl) = S.fromList $ concat $ artists <$> tl
   where
     artists (Track _ _ as) = as
 
--- Get the artist's collaborators without the artist present
-getCollaborators :: Token -> Artist -> IO (S.Set Artist)
-getCollaborators token artist = do
-  tracks <- getArtistTracks token artist
-  let artists = uniqueArtists tracks
-  return $ S.delete artist artists
-
 -- Represent a collaboration between artists on a given track
 data Collaboration = Collaboration Artist Artist Track deriving (Show, Eq, Ord)
 
+-- Gets all collaborations for an artist
+-- Gets unidirectional collaborations
+-- For songs with many people, does all-pairs
+-- Also does not assume the passed-in artist is the first artist
 getCollaborations :: Token -> Artist -> IO [Collaboration]
 getCollaborations token artist = do
   TrackList tracks <- getArtistTracks token artist
-  let artists (Track _ _ as) = as
-      collabs = concatMap (\t -> (Collaboration artist) <$> (artists t) <*> [t]) tracks
+  let getCollabs t@(Track _ _ as) = nub [Collaboration x y t | x <- as, y <- as]
+      collabs = concatMap getCollabs tracks
   return $ filter (\(Collaboration a1 a2 _) -> a1 /= a2) collabs
 
-getCollaborator :: Collaboration -> Artist
-getCollaborator (Collaboration _ a _) = a
+getCollaborators :: Collaboration -> [Artist]
+getCollaborators (Collaboration a1 a2 _) = [a1, a2]
 
 data Scraper = Scraper { _queue :: SQ.Seq Artist
                        , _collaborations :: SQ.Seq Collaboration
@@ -184,6 +181,7 @@ data Scraper = Scraper { _queue :: SQ.Seq Artist
                        }
 makeLenses ''Scraper
 
+-- TODO: Parallelise
 stepScraper :: StateT Scraper IO ()
 stepScraper = do
   s <- get
@@ -196,7 +194,7 @@ stepScraper = do
       -- Keep track of the collaborations we found
       modify (over collaborations ((SQ.fromList cs) SQ.><))
       -- Get collaborators that we haven't already scraped
-      let newAs = nub $ filter (not . (`S.member` (s ^. seen))) (getCollaborator <$> cs)
+      let newAs = nub $ filter (not . (`S.member` (s ^. seen))) (concatMap getCollaborators cs)
       -- Add all new artists to the seen set so that the queue doesn't have duplicates
       modify (over seen $ \acc -> foldl' (flip S.insert) acc newAs)
       -- Add collaborators to queue for scraping
@@ -218,7 +216,7 @@ logScraper = do
 runScraper :: StateT Scraper IO ()
 runScraper = do
   logScraper
-  _ <- liftIO getLine
+  -- _ <- liftIO getLine
   s <- get
   if SQ.null (s ^. queue)
      then return ()
