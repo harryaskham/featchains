@@ -17,6 +17,7 @@ import qualified Data.Text.Encoding  as E
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as LBC
+import Control.Monad ( replicateM_ )
 import Control.Monad.State
     ( MonadIO(liftIO),
       MonadState(get),
@@ -24,7 +25,7 @@ import Control.Monad.State
       gets,
       evalStateT )
 import Network.Wreq
-    ( getWith,
+    (responseHeader,  getWith,
       postWith,
       defaults,
       header,
@@ -32,6 +33,7 @@ import Network.Wreq
       responseBody,
       responseStatus,
       statusCode,
+      checkResponse,
       Response,
       FormParam((:=)) )
 import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
@@ -107,6 +109,7 @@ search (Token token) query queryType limit offset = do
                       & param "type" .~ [queryType]
                       & param "limit" .~ [T.pack $ show limit]
                       & param "offset" .~ [T.pack $ show offset]
+                      & checkResponse .~ (Just $ \_ _ -> return ())
   getWith opts uri
 
 newtype ArtistId = ArtistId T.Text deriving (Show, Eq, Ord)
@@ -152,7 +155,9 @@ getArtistTracks token artist@(Artist _ (ArtistName name)) = do
     404 -> return (TrackList [])
     -- Need to rate-limit, retry after a second
     429 -> do
-      threadDelay 1000000
+      let waitFor = r ^. responseHeader "Retry-After"
+          waitForSecs = read $ T.unpack $ E.decodeUtf8 waitFor
+      threadDelay $ 1000000 * waitForSecs
       getArtistTracks token artist
     _ -> error "Unexpected status code"
 
@@ -262,9 +267,11 @@ scraperLogger scraper = do
 
 main :: IO ()
 main = do
+  -- Get OAuth token
   secret <- clientSecret
   token <- getToken secret
-  print token
+
+  -- Define seed artist and scraper state
   let jam = Artist (ArtistId "6ST2sHlQoWYjxkIVnuW2mr") (ArtistName "Jam Baxter")
   queueM <- newMVar $ SQ.singleton jam
   collaborationsM <- newMVar SQ.empty
@@ -276,9 +283,9 @@ main = do
                         , _seen = seenM
                         , _token = token
                         }
-  forkIO $ evalStateT runScraper scraper
-  forkIO $ evalStateT runScraper scraper
-  forkIO $ evalStateT runScraper scraper
-  forkIO $ evalStateT runScraper scraper
-  forkIO $ evalStateT runScraper scraper
+
+  -- Kick off N workers
+  replicateM_ 10 $ forkIO $ evalStateT runScraper scraper
+
+  -- Block on the logger thread
   scraperLogger scraper
