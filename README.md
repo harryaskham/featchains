@@ -14,4 +14,10 @@ Written up in Haskell.
 - Rate-limited scraping working
 - Simple query examples done
 - Data is dominated by huge choirs / orchestras
+
+## Next Steps
+
 - Messy one-script code, to be cleaned up
+- persist info about which artists have been scraped
+- enable resuming from database
+- start writing graph algos
