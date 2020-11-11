@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 1e5cc7a0b0061d89c56bebd8479a6f459ddaac049db3e02a706a2b2ba81ebe30
+-- hash: 9a8adaf0df701d39c789dadc2b3990aea1b60f881a8cf2a1c9b135cf97dc12ed
 
 name:           featchains
 version:        0.1.0.0
@@ -37,6 +37,7 @@ library
     , base >=4.7 && <5
     , base64
     , bytestring
+    , containers
     , lens
     , text
     , wreq
@@ -54,6 +55,7 @@ executable featchains-exe
     , base >=4.7 && <5
     , base64
     , bytestring
+    , containers
     , featchains
     , lens
     , text
@@ -73,6 +75,7 @@ test-suite featchains-test
     , base >=4.7 && <5
     , base64
     , bytestring
+    , containers
     , featchains
     , lens
     , text

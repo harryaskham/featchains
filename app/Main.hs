@@ -4,6 +4,9 @@
 
 module Main where
 
+import Data.List ( foldl' )
+import Data.Maybe ( catMaybes )
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.Encoding  as LE
@@ -18,9 +21,11 @@ import Network.Wreq
       header,
       param,
       responseBody,
+      responseStatus,
+      statusCode,
       Response,
       FormParam((:=)) )
-import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject, withArray )
+import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
 import Control.Lens ( (&), (^.), (.~) )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
 
@@ -35,6 +40,7 @@ Look at graphDB options
 Build graph inmem
 On the fly bfs / dfs
 All-pairs caching?
+artistname sometimes has semicolons; ampersands, etc
 
 SCRAPER
 =======
@@ -91,13 +97,13 @@ search (Token token) query queryType limit offset = do
                       & param "offset" .~ [T.pack $ show offset]
   getWith opts uri
 
-newtype ArtistId = ArtistId T.Text deriving (Show)
-newtype ArtistName = ArtistName T.Text deriving (Show)
-data Artist = Artist ArtistId ArtistName deriving (Show)
-newtype TrackId = TrackId T.Text deriving (Show)
-newtype TrackName = TrackName T.Text deriving (Show)
-data Track = Track TrackId TrackName [Artist] deriving (Show)
-newtype TrackList = TrackList [Track] deriving (Show)
+newtype ArtistId = ArtistId T.Text deriving (Show, Eq, Ord)
+newtype ArtistName = ArtistName T.Text deriving (Show, Eq, Ord)
+data Artist = Artist ArtistId ArtistName deriving (Show, Eq, Ord)
+newtype TrackId = TrackId T.Text deriving (Show, Eq, Ord)
+newtype TrackName = TrackName T.Text deriving (Show, Eq, Ord)
+data Track = Track TrackId TrackName [Artist] deriving (Show, Eq, Ord)
+newtype TrackList = TrackList [Track] deriving (Show, Eq, Ord, Semigroup, Monoid)
 
 instance FromJSON TrackList where
   parseJSON =
@@ -119,19 +125,41 @@ instance FromJSON Artist where
             <$> (ArtistId <$> v .: "id")
             <*> (ArtistName <$> v .: "name")
 
--- TODO: Get all results with a fold
-getArtistTracks :: Token -> ArtistName -> IO TrackList
-getArtistTracks token (ArtistName name) = do
-  r <- search token ("artist:" <> name) "track" 50 0
-  case decode $ r ^. responseBody of
-    Just tl -> return tl
-    Nothing -> error $ LBC.unpack $ r ^. responseBody
+-- Get tracks for a given artist
+-- Right now returns up to 50 tracks
+-- Remixes will mess up the stats
+getArtistTracks :: Token -> Artist -> IO TrackList
+getArtistTracks token (Artist _ (ArtistName name)) = do
+  let offsets = [0]
+  r <- traverse (search token ("artist:" <> name) "track" 50) offsets
+  let parseR r = case r ^. responseStatus . statusCode of
+                   200 -> case decode $ r ^. responseBody of
+                                Just tl -> Just tl
+                                Nothing -> error "Invalid body"
+                   404 -> Nothing
+                   _ -> error "Unexpected status code"
+      tls = catMaybes $ parseR <$> r
+  return $ foldl' (<>) (TrackList []) tls
+
+-- Extract the unique artists from a tracklist
+uniqueArtists :: TrackList -> S.Set Artist
+uniqueArtists (TrackList tl) = S.fromList $ concat $ artists <$> tl
+  where
+    artists (Track _ _ as) = as
+
+-- Get the artist's collaborators without the artist present
+getCollaborators :: Token -> Artist -> IO (S.Set Artist)
+getCollaborators token artist = do
+  tracks <- getArtistTracks token artist
+  let artists = uniqueArtists tracks
+  return $ S.delete artist artists
 
 main :: IO ()
 main = do
   secret <- clientSecret
   token <- getToken secret
   print token
-  jamTracks <- getArtistTracks token (ArtistName "jam baxter")
-  print jamTracks
-
+  -- Need a seed artist
+  let jam = Artist (ArtistId "6ST2sHlQoWYjxkIVnuW2mr") (ArtistName "Jam Baxter")
+  collaborators <- getCollaborators token jam
+  print collaborators
