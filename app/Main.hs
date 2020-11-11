@@ -250,14 +250,11 @@ logScraper = do
   liftIO $ putStrLn $ "Artists scraped: " <> show (S.size done)
 
 runScraper :: StateT Scraper IO ()
-runScraper = stepScraper >> runScraper
-  -- Log progress every second
-  -- _ <- liftIO getLine
-  -- s <- get
-  -- q <- gets (view queue) >>= (liftIO . readMVar)
-  -- if SQ.null q
-  --    then return ()
-  --    else stepScraper >> runScraper
+runScraper = do
+  stepScraper
+  -- Artificial delay to avoid getting so rate-limited
+  -- liftIO $ threadDelay 200000
+  runScraper
 
 scraperLogger :: Scraper -> IO ()
 scraperLogger scraper = do
@@ -285,7 +282,7 @@ main = do
                         }
 
   -- Kick off N workers
-  replicateM_ 10 $ forkIO $ evalStateT runScraper scraper
+  replicateM_ 8 $ forkIO $ evalStateT runScraper scraper
 
   -- Block on the logger thread
   scraperLogger scraper
