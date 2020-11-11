@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 9a8adaf0df701d39c789dadc2b3990aea1b60f881a8cf2a1c9b135cf97dc12ed
+-- hash: 5a6bb1b8740ba402b8f162804399805639803348aa319f561baef36c498741a4
 
 name:           featchains
 version:        0.1.0.0
@@ -39,6 +39,7 @@ library
     , bytestring
     , containers
     , lens
+    , mtl
     , text
     , wreq
   default-language: Haskell2010
@@ -58,6 +59,7 @@ executable featchains-exe
     , containers
     , featchains
     , lens
+    , mtl
     , text
     , wreq
   default-language: Haskell2010
@@ -78,6 +80,7 @@ test-suite featchains-test
     , containers
     , featchains
     , lens
+    , mtl
     , text
     , wreq
   default-language: Haskell2010

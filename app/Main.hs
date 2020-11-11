@@ -4,8 +4,9 @@
 
 module Main where
 
-import Data.List ( foldl' )
+import Data.List ( foldl', nub )
 import Data.Maybe ( catMaybes )
+import qualified Data.Sequence as SQ
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
@@ -14,6 +15,12 @@ import qualified Data.Text.Encoding  as E
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as LBC
+import Control.Monad.State
+    ( MonadIO(liftIO),
+      MonadState(get),
+      StateT(runStateT),
+      gets,
+      modify )
 import Network.Wreq
     ( getWith,
       postWith,
@@ -26,7 +33,8 @@ import Network.Wreq
       Response,
       FormParam((:=)) )
 import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
-import Control.Lens ( (&), (^.), (.~) )
+import Control.Lens
+    ( (&), (^.), view, (.~), over, set, makeLenses )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
 
 {- TODO
@@ -78,7 +86,7 @@ instance FromJSON Token where
 getToken :: T.Text -> IO Token
 getToken secret = do
   let tokenUri = "https://accounts.spotify.com/api/token"
-  let opts = defaults & header "Authorization"
+      opts = defaults & header "Authorization"
                       .~ [E.encodeUtf8 $ "Basic " <> (encodeBase64 (clientId <> ":" <> secret))]
   r <-
     postWith opts tokenUri
@@ -87,6 +95,7 @@ getToken secret = do
     Just token -> return token
     Nothing -> error "Invalid token response"
 
+-- Issue a GET search request
 search :: Token -> T.Text -> T.Text -> Int -> Int -> IO (Response LB.ByteString)
 search (Token token) query queryType limit offset = do
   let uri = apiUri <> "/search"
@@ -154,12 +163,76 @@ getCollaborators token artist = do
   let artists = uniqueArtists tracks
   return $ S.delete artist artists
 
+-- Represent a collaboration between artists on a given track
+data Collaboration = Collaboration Artist Artist Track deriving (Show, Eq, Ord)
+
+getCollaborations :: Token -> Artist -> IO [Collaboration]
+getCollaborations token artist = do
+  TrackList tracks <- getArtistTracks token artist
+  let artists (Track _ _ as) = as
+      collabs = concatMap (\t -> (Collaboration artist) <$> (artists t) <*> [t]) tracks
+  return $ filter (\(Collaboration a1 a2 _) -> a1 /= a2) collabs
+
+getCollaborator :: Collaboration -> Artist
+getCollaborator (Collaboration _ a _) = a
+
+data Scraper = Scraper { _queue :: SQ.Seq Artist
+                       , _collaborations :: SQ.Seq Collaboration
+                       , _token :: Token
+                       , _done :: S.Set Artist
+                       }
+makeLenses ''Scraper
+
+stepScraper :: StateT Scraper IO ()
+stepScraper = do
+  s <- get
+  case SQ.viewl $ s ^. queue of
+    a SQ.:< q -> do
+      -- Pull all collaborative tracks for this artist
+      cs <- liftIO $ getCollaborations (s ^. token) a
+      -- Track that we scraped this artist
+      modify (over done (S.insert a))
+      -- Keep track of the collaborations we found
+      modify (over collaborations ((SQ.fromList cs) SQ.><))
+      -- Get collaborators that we haven't already scraped
+      let newAs = nub $ filter (not . (`S.member` (s ^. done))) (getCollaborator <$> cs)
+      -- Add collaborators to queue for scraping
+      modify (set queue $ q SQ.>< (SQ.fromList newAs))
+    SQ.EmptyL -> return ()
+
+logScraper :: StateT Scraper IO ()
+logScraper = do
+  q <- gets (view queue)
+  cs <- gets (view collaborations)
+  done <- gets (view done)
+  case SQ.viewl q of
+    (Artist _ (ArtistName name)) SQ.:< _ -> liftIO $ putStrLn $ "Next Artist: " <> show name
+    SQ.EmptyL -> liftIO $ putStrLn "No next artist"
+  liftIO $ putStrLn $ "Queue length: " <> show (SQ.length q)
+  liftIO $ putStrLn $ "Collaborations found: " <> show (SQ.length cs)
+  liftIO $ putStrLn $ "Artists scraped: " <> show (S.size done)
+
+runScraper :: StateT Scraper IO ()
+runScraper = do
+  logScraper
+  _ <- liftIO getLine
+  s <- get
+  if SQ.null (s ^. queue)
+     then return ()
+     else stepScraper >> runScraper
+
 main :: IO ()
 main = do
   secret <- clientSecret
   token <- getToken secret
   print token
-  -- Need a seed artist
   let jam = Artist (ArtistId "6ST2sHlQoWYjxkIVnuW2mr") (ArtistName "Jam Baxter")
-  collaborators <- getCollaborators token jam
-  print collaborators
+      scraper = Scraper { _queue = SQ.singleton jam
+                        , _collaborations = SQ.empty
+                        , _token = token
+                        , _done = S.empty
+                        }
+  (_, finalScraper) <- runStateT runScraper scraper
+  print "done"
+
+pc (Collaboration (Artist _ (ArtistName n1)) (Artist _ (ArtistName n2)) (Track _ (TrackName tn) _)) = (n1, n2, tn)

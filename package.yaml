@@ -28,6 +28,7 @@ dependencies:
 - aeson
 - lens
 - base64
+- mtl
 
 library:
   source-dirs: src
