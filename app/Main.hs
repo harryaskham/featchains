@@ -33,6 +33,18 @@ Look at graphDB options
 Build graph inmem
 On the fly bfs / dfs
 All-pairs caching?
+
+SCRAPER
+=======
+pick a seed artist
+get all songs
+filter to those with feats or collabs
+add edges between artists
+mark original as done
+add collabs to queue for the same
+parallelisation might be wasteful when building the graph
+so we need artist-level locks, only one thread can be doing one artist at once
+simple artist-request caching should be sufficient as long as all threads can access it
 -}
 
 clientId :: T.Text
