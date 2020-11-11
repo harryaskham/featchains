@@ -18,6 +18,11 @@ import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as LBC
 import Database.PostgreSQL.Simple
+    ( executeMany,
+      connect,
+      defaultConnectInfo,
+      ConnectInfo(connectDatabase, connectPassword),
+      Connection )
 import Control.Monad ( replicateM_ )
 import Control.Monad.State
     ( MonadIO(liftIO),
