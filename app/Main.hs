@@ -235,11 +235,13 @@ logScraper = do
   q <- gets (view queue) >>= (liftIO . readMVar)
   cs <- gets (view collaborations) >>= (liftIO . readMVar)
   done <- gets (view done) >>= (liftIO . readMVar)
+  seen <- gets (view seen) >>= (liftIO . readMVar)
   case SQ.viewl q of
     (Artist _ (ArtistName name)) SQ.:< _ -> liftIO $ putStrLn $ "Next Artist: " <> show name
     SQ.EmptyL -> liftIO $ putStrLn "No next artist"
   liftIO $ putStrLn $ "Queue length: " <> show (SQ.length q)
   liftIO $ putStrLn $ "Collaborations found: " <> show (SQ.length cs)
+  liftIO $ putStrLn $ "Artists seen: " <> show (S.size seen)
   liftIO $ putStrLn $ "Artists scraped: " <> show (S.size done)
 
 runScraper :: StateT Scraper IO ()
