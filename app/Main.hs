@@ -10,6 +10,7 @@ import qualified Data.Text.Lazy.Encoding  as LE
 import qualified Data.Text.Encoding  as E
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy.Char8 as LBC
 import Network.Wreq
     ( getWith,
       postWith,
@@ -17,8 +18,9 @@ import Network.Wreq
       header,
       param,
       responseBody,
+      Response,
       FormParam((:=)) )
-import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
+import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject, withArray )
 import Control.Lens ( (&), (^.), (.~) )
 import Data.Text.Encoding.Base64 ( encodeBase64 )
 
@@ -79,29 +81,57 @@ getToken secret = do
     Just token -> return token
     Nothing -> error "Invalid token response"
 
-searchUri :: String
-searchUri = apiUri <> "/search"
+search :: Token -> T.Text -> T.Text -> Int -> Int -> IO (Response LB.ByteString)
+search (Token token) query queryType limit offset = do
+  let uri = apiUri <> "/search"
+      opts = defaults & header "Authorization" .~ [E.encodeUtf8 $ "Bearer " <> token]
+                      & param "q" .~ [query]
+                      & param "type" .~ [queryType]
+                      & param "limit" .~ [T.pack $ show limit]
+                      & param "offset" .~ [T.pack $ show offset]
+  getWith opts uri
 
-search :: IO LB.ByteString
-search = do
-  let opts = defaults & param "q" .~ ["Jam Baxter"]
-                      & param "type" .~ ["artist"]
-  r <- getWith opts searchUri
-  return $ r ^. responseBody
+newtype ArtistId = ArtistId T.Text deriving (Show)
+newtype ArtistName = ArtistName T.Text deriving (Show)
+data Artist = Artist ArtistId ArtistName deriving (Show)
+newtype TrackId = TrackId T.Text deriving (Show)
+newtype TrackName = TrackName T.Text deriving (Show)
+data Track = Track TrackId TrackName [Artist] deriving (Show)
+newtype TrackList = TrackList [Track] deriving (Show)
 
-getArtistsUri :: String -> String
-getArtistsUri artistId = apiUri <> "/artists/" <> artistId
+instance FromJSON TrackList where
+  parseJSON =
+    withObject "TrackList"
+    $ \v -> TrackList <$> (v .: "tracks" >>= (.: "items"))
 
-getArtist :: Token  -> String -> IO LB.ByteString
-getArtist (Token token) artistId  = do
-  let opts = defaults & header "Authorization" .~ [E.encodeUtf8 $ "Bearer " <> token]
-  r <- getWith opts $ getArtistsUri artistId
-  return $ r ^. responseBody
+instance FromJSON Track where
+  parseJSON =
+    withObject "Track"
+    $ \v -> Track
+            <$> (TrackId <$> v .: "id")
+            <*> (TrackName <$> v .: "name")
+            <*> (v .: "artists")
+
+instance FromJSON Artist where
+  parseJSON =
+    withObject "Artist"
+    $ \v -> Artist
+            <$> (ArtistId <$> v .: "id")
+            <*> (ArtistName <$> v .: "name")
+
+-- TODO: Get all results with a fold
+getArtistTracks :: Token -> ArtistName -> IO TrackList
+getArtistTracks token (ArtistName name) = do
+  r <- search token ("artist:" <> name) "track" 50 0
+  case decode $ r ^. responseBody of
+    Just tl -> return tl
+    Nothing -> error $ LBC.unpack $ r ^. responseBody
 
 main :: IO ()
 main = do
   secret <- clientSecret
   token <- getToken secret
   print token
-  artist <- getArtist token "0TnOYISbd1XYRBk9myaseg"
-  print artist
+  jamTracks <- getArtistTracks token (ArtistName "jam baxter")
+  print jamTracks
+
