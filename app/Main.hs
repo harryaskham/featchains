@@ -10,10 +10,11 @@
 module Main where
 
 import Data.List ( foldl', nub )
-import Data.Maybe ( catMaybes )
+import Data.Maybe ( catMaybes, fromMaybe )
 import GHC.Generics (Generic)
 import Data.Graph
 import Data.Array
+import System.IO.Unsafe
 import qualified Data.Sequence as SQ
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -29,7 +30,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBC
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.SqlQQ
-import Control.Monad ( replicateM_ )
+import Control.Monad ( replicateM_, forM_ )
 import Control.Monad.State
     ( MonadIO(liftIO),
       MonadState(get),
@@ -299,11 +300,18 @@ scraperMain = do
   -- Block on the logger thread
   scraperLogger scraper
 
-graphMain :: IO ()
-graphMain = do
-  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
-                                     , connectPassword = "postgres"
-                                     }
+data GraphInfo = GraphInfo { _graph :: Graph
+                           , _idToArtist :: M.Map T.Text T.Text
+                           , _artistToId :: M.Map T.Text T.Text
+                           , _idToTrack :: M.Map T.Text T.Text
+                           , _nodeFromVertex :: Vertex -> (T.Text, T.Text, [T.Text])
+                           , _vertexFromKey :: T.Text -> Maybe Vertex
+                           , _edgeLookup :: M.Map (T.Text, T.Text) [T.Text]
+                           }
+makeLenses ''GraphInfo
+
+buildGraph :: Connection -> IO GraphInfo
+buildGraph conn = do
   -- Some convenience lookups
   idToArtist <-
     M.fromList
@@ -316,33 +324,12 @@ graphMain = do
   print "Querying..."
   rows <-
     query_ conn
-    $ [sql| select distinct
+    $ [sql| select
               first_artist_id,
-              first_artist_name,
               second_artist_id,
-              artist_name as second_artist_name,
-              track_id,
-              track_name
-            from (
-              select
-                first_artist_id,
-                artist_name as first_artist_name,
-                second_artist_id,
-                track_id,
-                track_name
-              from (
-                select
-                  first_artist_id,
-                  second_artist_id,
-                  track.track_id,
-                  track_name
-                from
-                  collaboration
-                inner join track on collaboration.track_id=track.track_id
-              ) as mid inner join artist on mid.first_artist_id=artist.artist_id
-            ) as mid2 inner join artist on mid2.second_artist_id=artist.artist_id
-            limit 100000000000
-      |] :: (IO [(T.Text, T.Text, T.Text, T.Text, T.Text, T.Text)])
+              track_id
+            from collaboration
+      |] :: (IO [(T.Text, T.Text, T.Text)])
 
   print $ T.pack (show (M.size idToArtist)) <> " artists"
   print $ T.pack (show (M.size idToTrack)) <> " tracks"
@@ -351,41 +338,73 @@ graphMain = do
   print "Building graph and lookups"
 
   -- Have a way to "label" vertices by the list of tracks that link the artists
-  let rowToEdgeLookup (aId1, aName1, aId2, aName2, tId, tName) = ((aId1, aId2), [(tId, tName)])
+  let rowToEdgeLookup (aId1, aId2, tId) = ((aId1, aId2), [tId])
       edgeLookup = M.fromListWith (++) $ rowToEdgeLookup <$> rows
 
   -- Convert into graph form with nodes being names, IDs being IDs
   -- Need to get a lookup map from ID to all things it's connected to
-  let rowToEdges (aId1, aName1, aId2, aName2, tId, tName) = [ (aId1, [aId2]) ]
-                                                            -- , (aId2, [aId1])
-                                                            -- ]
+  let rowToEdges (aId1, aId2, _) = [ (aId1, [aId2]) ]
       adjacencyMap = M.fromListWith (++) (concatMap rowToEdges rows)
       edgeList = (\(aId1, toIds) -> (aId1, aId1, nub toIds)) <$> M.toList adjacencyMap
       (graph, nodeFromVertex, vertexFromKey) = graphFromEdges edgeList
 
-  print $ take 10 $ vertices graph
-  print $ take 10 $ edges graph
+  return $ GraphInfo { _graph = graph
+                     , _idToArtist = idToArtist
+                     , _artistToId = artistToId
+                     , _idToTrack = idToTrack
+                     , _nodeFromVertex = nodeFromVertex
+                     , _vertexFromKey = vertexFromKey
+                     , _edgeLookup = edgeLookup
+                     }
 
+-- TODO: Make safe
+getPath :: T.Text -> T.Text -> GraphInfo -> Maybe [(ArtistName, ArtistName, [TrackName])]
+getPath a1Name a2Name g = do
   let fst3 (a, _, _) = a
-  let vToName = (flip M.lookup $ idToArtist) . fst3 . nodeFromVertex
+      vToId = fst3 . (g^.nodeFromVertex)
+      vToName = (flip M.lookup $ (g^.idToArtist)) . fst3 . (g^.nodeFromVertex)
+      (Just a1Id) = M.lookup a1Name (g^.artistToId)
+      (Just a2Id) = M.lookup a2Name (g^.artistToId)
+      (Just a1V) = (g^.vertexFromKey) a1Id
+      (Just a2V) = (g^.vertexFromKey) a2Id
+  case graphBfs (g^.graph) a1V a2V of
+    Nothing -> Nothing
+    Just path -> do
+      let aIdPath = vToId <$> path
+          aIdPairs = zip aIdPath $ tail aIdPath
+          tIdPath = catMaybes $ (flip M.lookup (g^.edgeLookup)) <$> aIdPairs
+          tNamePath :: [[T.Text]]
+          tNamePath = (fmap.fmap) (fromMaybe "" . flip M.lookup (g^.idToTrack)) tIdPath
+          aNamePath = catMaybes $ (flip M.lookup (g^.idToArtist)) <$> aIdPath
+          aNamePairs :: [(T.Text, T.Text)]
+          aNamePairs = zip aNamePath $ tail aNamePath
+          nameTrackPath = (\((a, b), c ) -> (ArtistName a, ArtistName b, TrackName <$> c)) <$> (zip aNamePairs tNamePath)
+      Just nameTrackPath
 
-  -- See if we can find simple paths
-  let a1Name = "Eminem" :: T.Text
-      a2Name = "Emma Bunton" :: T.Text
-      (Just a1Id) = M.lookup a1Name artistToId
-      (Just a2Id) = M.lookup a2Name artistToId
-      (Just a1V) = vertexFromKey a1Id
-      (Just a2V) = vertexFromKey a2Id
-  print $ "Is there a path from " <> a1Name <> " to " <> a2Name <> ": " <> T.pack (show (path graph a1V a2V))
+getGraph :: IO GraphInfo
+getGraph = do
+  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
+                                     , connectPassword = "postgres"
+                                     }
+  buildGraph conn
 
-  -- Who did MM collaborate with?
-  -- Whoops reachable is .. the whole set.
-  -- print $ take 10 names
+unsafeGetGraph :: GraphInfo
+unsafeGetGraph = unsafePerformIO getGraph
 
-  let path = case graphBfs graph a1V a2V of
-               Just path -> catMaybes $ vToName <$> path
-               Nothing -> []
-  print path
+printPath :: [(ArtistName, ArtistName, [TrackName])] -> IO ()
+printPath path = do
+  forM_ path (\((ArtistName n1), (ArtistName (n2)), ts) -> do
+                 putStrLn $ T.unpack $ n1 <> " and " <> n2 <> " collaborated on: "
+                 forM_ ts (\(TrackName tn) -> putStrLn $ T.unpack tn)
+                 putStrLn "")
+
+-- Prettyprinter for console
+pp :: GraphInfo -> String -> String -> IO ()
+pp g a1 a2 = do
+  let path = getPath (T.pack a1) (T.pack a2) g
+  case path of
+    Just p -> printPath p
+    Nothing -> putStrLn "No path"
 
 -- BFS between two nodes, returns the path if there is one
 graphBfs :: Graph -> Vertex -> Vertex -> Maybe [Vertex]
@@ -405,5 +424,5 @@ graphBfs graph start end = go graph end S.empty (SQ.singleton (start, []))
 
 main :: IO ()
 main = do
-  -- scraperMain
-  graphMain
+  print "main disabled"
+  --scraperMain
