@@ -5,6 +5,7 @@ Perform a BFS of the Spotify API where nodes are artists, and edges are collabor
 Written up in Haskell. Currently in exploratory, single-file scripting phase. Supports scraping and finding chains of artists in reasonable time.
 
 Typical output:
+
 ![output](example.jpg)
 
 ## Requirements
