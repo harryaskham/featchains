@@ -5,11 +5,7 @@ Perform a BFS of the Spotify API where nodes are artists, and edges are collabor
 Written up in Haskell. Currently in exploratory, single-file scripting phase. Supports scraping and finding chains of artists in reasonable time.
 
 Typical output:
-
-```haskell
-"Is there a path from Eminem to Emma Bunton: True"
-["Eminem","Snoop Dogg","Olly Murs","Robbie Williams","Emma Bunton"]
-```
+![output](example.jpg)
 
 ## Requirements
 
@@ -18,7 +14,7 @@ Typical output:
 
 ## Next Steps
 
-- Track names to augment the path
 - More scraping, larger dataset
-- Need to store which artists we actually scraped versus just saw (first ID versus second ID as a proxy?)
+- Track whether we scraped an artist
+- Scrape more than 50 songs per artist
 - Resume scraping state

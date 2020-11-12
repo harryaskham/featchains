@@ -146,7 +146,10 @@ getArtistTracks token artist@(Artist _ (ArtistName name)) = do
           waitForSecs = read $ T.unpack $ E.decodeUtf8 waitFor
       threadDelay $ 1000000 * waitForSecs
       getArtistTracks token artist
-    _ -> error "Unexpected status code"
+    code -> do
+      print $ "Unexpected status code: " <> show code
+      threadDelay 1000000
+      getArtistTracks token artist
 
 -- Extract the unique artists from a tracklist
 uniqueArtists :: TrackList -> S.Set Artist
@@ -281,7 +284,7 @@ scraperMain = do
   token <- getToken secret
 
   -- Define seed artist and scraper state
-  let seed = Artist (ArtistId "3PhoLpVuITZKcymswpck5b") (ArtistName "Elton John")
+  let seed = Artist (ArtistId "1wGpIhDT3m6YdqubIYObcZ") (ArtistName "ReFeel")
   queueM <- newMVar $ SQ.singleton seed
   collaborationsM <- newMVar SQ.empty
   doneM <- newMVar S.empty
