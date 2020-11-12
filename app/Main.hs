@@ -281,8 +281,8 @@ scraperMain = do
   token <- getToken secret
 
   -- Define seed artist and scraper state
-  let jam = Artist (ArtistId "6ST2sHlQoWYjxkIVnuW2mr") (ArtistName "Jam Baxter")
-  queueM <- newMVar $ SQ.singleton jam
+  let seed = Artist (ArtistId "2FcC4sDMXme2ziI7tGKMK8") (ArtistName "David Gilmour")
+  queueM <- newMVar $ SQ.singleton seed
   collaborationsM <- newMVar SQ.empty
   doneM <- newMVar S.empty
   seenM <- newMVar S.empty
@@ -423,6 +423,4 @@ graphBfs graph start end = go graph end S.empty (SQ.singleton (start, []))
         SQ.EmptyL -> Nothing
 
 main :: IO ()
-main = do
-  print "main disabled"
-  --scraperMain
+main = scraperMain
