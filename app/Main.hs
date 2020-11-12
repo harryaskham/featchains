@@ -4,6 +4,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TupleSections #-}
 
 
 module Main where
@@ -355,19 +356,22 @@ graphMain = do
 
   -- Convert into graph form with nodes being names, IDs being IDs
   -- Need to get a lookup map from ID to all things it's connected to
-  let rowToEdges (aId1, aName1, aId2, aName2, tId, tName) = [ (aId1, [aId2])
-                                                            , (aId2, [aId1])
-                                                            ]
+  let rowToEdges (aId1, aName1, aId2, aName2, tId, tName) = [ (aId1, [aId2]) ]
+                                                            -- , (aId2, [aId1])
+                                                            -- ]
       adjacencyMap = M.fromListWith (++) (concatMap rowToEdges rows)
-      edgeList = (\(aId1, toIds) -> (aId1, aId1, toIds)) <$> M.toList adjacencyMap
+      edgeList = (\(aId1, toIds) -> (aId1, aId1, nub toIds)) <$> M.toList adjacencyMap
       (graph, nodeFromVertex, vertexFromKey) = graphFromEdges edgeList
 
   print $ take 10 $ vertices graph
   print $ take 10 $ edges graph
 
+  let fst3 (a, _, _) = a
+  let vToName = (flip M.lookup $ idToArtist) . fst3 . nodeFromVertex
+
   -- See if we can find simple paths
-  let a1Name = "Kano" :: T.Text
-      a2Name = "Rihanna" :: T.Text
+  let a1Name = "Eminem" :: T.Text
+      a2Name = "Emma Bunton" :: T.Text
       (Just a1Id) = M.lookup a1Name artistToId
       (Just a2Id) = M.lookup a2Name artistToId
       (Just a1V) = vertexFromKey a1Id
@@ -378,26 +382,25 @@ graphMain = do
   -- Whoops reachable is .. the whole set.
   -- print $ take 10 names
 
-  let fst3 (a, _, _) = a
   let path = case graphBfs graph a1V a2V of
-               Just path -> catMaybes $ (flip M.lookup $ idToArtist) . fst3 . nodeFromVertex <$> path
+               Just path -> catMaybes $ vToName <$> path
                Nothing -> []
   print path
 
 -- BFS between two nodes, returns the path if there is one
 graphBfs :: Graph -> Vertex -> Vertex -> Maybe [Vertex]
-graphBfs graph start end = go graph end S.empty [] (SQ.singleton start)
+graphBfs graph start end = go graph end S.empty (SQ.singleton (start, []))
   where
-    go graph end visited path q =
+    go graph end visited q =
       case SQ.viewl q of
-        (current SQ.:< queue) ->
+        ((current, path) SQ.:< queue) ->
           let newVisited = S.insert current visited
               neighbours = filter (not . (`S.member` newVisited)) (graph ! current)
-              newQueue = queue SQ.>< SQ.fromList neighbours
               newPath = current:path
+              newQueue = queue SQ.>< SQ.fromList ((,newPath) <$> neighbours)
            in if current == end
               then Just $ reverse (current:path)
-              else go graph end newVisited newPath newQueue
+              else go graph end newVisited newQueue
         SQ.EmptyL -> Nothing
 
 main :: IO ()
