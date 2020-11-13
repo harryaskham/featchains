@@ -307,7 +307,7 @@ scraperMain = do
   token <- getToken secret
 
   -- Define seed artist and scraper state
-  let seed = Artist (ArtistId "1wGpIhDT3m6YdqubIYObcZ") (ArtistName "ReFeel")
+  let seed = Artist (ArtistId "73sIBHcqh3Z3NyqHKZ7FOL") (ArtistName "Childish Gambino")
   queueM <- newMVar $ SQ.singleton seed
   collaborationsM <- newMVar SQ.empty
   doneM <- newMVar S.empty
