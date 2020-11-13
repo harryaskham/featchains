@@ -1,59 +1,73 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
-
 
 module Main where
 
-import Data.List ( foldl', nub )
-import Data.Maybe ( catMaybes, fromMaybe )
-import GHC.Generics (Generic)
-import Data.Graph
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar
+  ( MVar,
+    newMVar,
+    putMVar,
+    readMVar,
+    takeMVar,
+  )
+import Control.Lens
+  ( makeLenses,
+    over,
+    set,
+    view,
+    (&),
+    (.~),
+    (^.),
+  )
+import Control.Monad (forM_, replicateM_)
+import Control.Monad.State
+  ( MonadIO (liftIO),
+    MonadState (get),
+    StateT (runStateT),
+    evalStateT,
+    gets,
+  )
+import Data.Aeson (FromJSON (parseJSON), decode, withObject, (.:))
 import Data.Array
-import System.IO.Unsafe
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as LB
+import qualified Data.ByteString.Lazy.Char8 as LBC
+import Data.Graph
+import Data.List (foldl', nub)
+import qualified Data.Map.Strict as M
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Sequence as SQ
 import qualified Data.Set as S
 import qualified Data.Text as T
-import qualified Data.Map.Strict as M
-import Control.Concurrent.MVar
-    ( newMVar, putMVar, readMVar, takeMVar, MVar )
+import qualified Data.Text.Encoding as E
+import Data.Text.Encoding.Base64 (encodeBase64)
 import qualified Data.Text.Lazy as LT
-import qualified Data.Text.Lazy.Encoding  as LE
-import qualified Data.Text.Encoding  as E
-import qualified Data.ByteString.Lazy as LB
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy.Char8 as LBC
+import qualified Data.Text.Lazy.Encoding as LE
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.SqlQQ
-import Control.Monad ( replicateM_, forM_ )
-import Control.Monad.State
-    ( MonadIO(liftIO),
-      MonadState(get),
-      StateT(runStateT),
-      gets,
-      evalStateT )
+import GHC.Generics (Generic)
 import Network.Wreq
-    (responseHeader,  getWith,
-      postWith,
-      defaults,
-      header,
-      param,
-      responseBody,
-      responseStatus,
-      statusCode,
-      checkResponse,
-      Response,
-      FormParam((:=)) )
-import Data.Aeson ( FromJSON(parseJSON), decode, (.:), withObject )
-import Control.Lens
-    ( (&), (^.), view, (.~), over, set, makeLenses )
-import Data.Text.Encoding.Base64 ( encodeBase64 )
-import Control.Concurrent ( threadDelay, forkIO )
+  ( FormParam ((:=)),
+    Response,
+    checkResponse,
+    defaults,
+    getWith,
+    header,
+    param,
+    postWith,
+    responseBody,
+    responseHeader,
+    responseStatus,
+    statusCode,
+  )
+import System.IO.Unsafe
 
 clientId :: T.Text
 clientId = "28342f3712b74711af0f925204a8aae1"
@@ -78,11 +92,13 @@ instance FromJSON Token where
 getToken :: T.Text -> IO Token
 getToken secret = do
   let tokenUri = "https://accounts.spotify.com/api/token"
-      opts = defaults & header "Authorization"
-                      .~ [E.encodeUtf8 $ "Basic " <> (encodeBase64 (clientId <> ":" <> secret))]
+      opts =
+        defaults
+          & header "Authorization"
+          .~ [E.encodeUtf8 $ "Basic " <> (encodeBase64 (clientId <> ":" <> secret))]
   r <-
-    postWith opts tokenUri
-    $ [("grant_type" :: B.ByteString) := ("client_credentials" :: B.ByteString)]
+    postWith opts tokenUri $
+      [("grant_type" :: B.ByteString) := ("client_credentials" :: B.ByteString)]
   case decode $ r ^. responseBody of
     Just token -> return token
     Nothing -> error "Invalid token response"
@@ -91,41 +107,51 @@ getToken secret = do
 search :: Token -> T.Text -> T.Text -> Int -> Int -> IO (Response LB.ByteString)
 search (Token token) query queryType limit offset = do
   let uri = apiUri <> "/search"
-      opts = defaults & header "Authorization" .~ [E.encodeUtf8 $ "Bearer " <> token]
-                      & param "q" .~ [query]
-                      & param "type" .~ [queryType]
-                      & param "limit" .~ [T.pack $ show limit]
-                      & param "offset" .~ [T.pack $ show offset]
-                      & checkResponse .~ (Just $ \_ _ -> return ())
+      opts =
+        defaults
+          & header "Authorization" .~ [E.encodeUtf8 $ "Bearer " <> token]
+          & param "q" .~ [query]
+          & param "type" .~ [queryType]
+          & param "limit" .~ [T.pack $ show limit]
+          & param "offset" .~ [T.pack $ show offset]
+          & checkResponse .~ (Just $ \_ _ -> return ())
   getWith opts uri
 
 newtype ArtistId = ArtistId T.Text deriving (Show, Eq, Ord)
+
 newtype ArtistName = ArtistName T.Text deriving (Show, Eq, Ord)
+
 data Artist = Artist ArtistId ArtistName deriving (Show, Eq, Ord)
+
 newtype TrackId = TrackId T.Text deriving (Show, Eq, Ord)
+
 newtype TrackName = TrackName T.Text deriving (Show, Eq, Ord)
+
 data Track = Track TrackId TrackName [Artist] deriving (Show, Eq, Ord)
+
 newtype TrackList = TrackList [Track] deriving (Show, Eq, Ord, Semigroup, Monoid)
 
 instance FromJSON TrackList where
   parseJSON =
-    withObject "TrackList"
-    $ \v -> TrackList <$> (v .: "tracks" >>= (.: "items"))
+    withObject "TrackList" $
+      \v -> TrackList <$> (v .: "tracks" >>= (.: "items"))
 
 instance FromJSON Track where
   parseJSON =
-    withObject "Track"
-    $ \v -> Track
-            <$> (TrackId <$> v .: "id")
-            <*> (TrackName <$> v .: "name")
-            <*> (v .: "artists")
+    withObject "Track" $
+      \v ->
+        Track
+          <$> (TrackId <$> v .: "id")
+          <*> (TrackName <$> v .: "name")
+          <*> (v .: "artists")
 
 instance FromJSON Artist where
   parseJSON =
-    withObject "Artist"
-    $ \v -> Artist
-            <$> (ArtistId <$> v .: "id")
-            <*> (ArtistName <$> v .: "name")
+    withObject "Artist" $
+      \v ->
+        Artist
+          <$> (ArtistId <$> v .: "id")
+          <*> (ArtistName <$> v .: "name")
 
 -- Get tracks for a given artist
 -- Right now returns up to 50 tracks
@@ -140,8 +166,8 @@ getArtistTracks token artist@(Artist _ (ArtistName name)) = do
   case r ^. responseStatus . statusCode of
     -- Success - parse the body
     200 -> case decode $ r ^. responseBody of
-             Just tl -> return $ Success tl
-             Nothing -> error "Invalid body"
+      Just tl -> return $ Success tl
+      Nothing -> error "Invalid body"
     -- No results for query / no more songs
     404 -> return $ Success (TrackList [])
     -- Need to rate-limit, retry after a second
@@ -151,8 +177,8 @@ getArtistTracks token artist@(Artist _ (ArtistName name)) = do
       threadDelay $ 1000000 * waitForSecs
       getArtistTracks token artist
     401 -> return BadToken
-    code -> do
-      print $ "Unexpected status code: " <> show code
+    unexpectedCode -> do
+      print $ "Unexpected status code, retrying: " <> show unexpectedCode
       threadDelay 1000000
       getArtistTracks token artist
 
@@ -169,7 +195,6 @@ data Collaboration = Collaboration Artist Artist Track deriving (Show, Eq, Ord)
 -- Gets unidirectional collaborations
 -- For songs with many people, does all-pairs
 -- Also does not assume the passed-in artist is the first artist
-
 getCollaborations :: Token -> Artist -> IO (SpotifyResponse [Collaboration])
 getCollaborations token artist = do
   r <- getArtistTracks token artist
@@ -183,14 +208,16 @@ getCollaborations token artist = do
 getCollaborators :: Collaboration -> [Artist]
 getCollaborators (Collaboration a1 a2 _) = [a1, a2]
 
-data Scraper = Scraper { _queue :: MVar (SQ.Seq Artist)
-                       , _collaborations :: MVar (SQ.Seq Collaboration)
-                       , _done :: MVar (S.Set Artist)
-                       , _seen :: MVar (S.Set Artist)
-                       , _secret :: T.Text
-                       , _token :: MVar Token
-                       , _conn :: Connection
-                       }
+data Scraper = Scraper
+  { _queue :: MVar (SQ.Seq Artist),
+    _collaborations :: MVar (SQ.Seq Collaboration),
+    _done :: MVar (S.Set Artist),
+    _seen :: MVar (S.Set Artist),
+    _secret :: T.Text,
+    _token :: MVar Token,
+    _conn :: Connection
+  }
+
 makeLenses ''Scraper
 
 stepScraper :: StateT Scraper IO ()
@@ -249,19 +276,15 @@ stepScraper = do
       -- Now handle database writes before moving on in key-satisfying order:
       -- Need to write the artist we just got and all other new artists
       let artistToTuple (Artist (ArtistId aId) (ArtistName aName)) = (aId, aName)
-      _ <- liftIO
-        $ executeMany (s ^. conn) "insert into artist (artist_id, artist_name) values (?, ?) on conflict do nothing"
-        $ (nub $ artistToTuple <$> (a:newAs))
+      _ <- liftIO $ executeMany (s ^. conn) "insert into artist (artist_id, artist_name) values (?, ?) on conflict do nothing" (nub $ artistToTuple <$> (a : newAs))
 
       -- Then the tracks
       let collaborationToTrackTuple (Collaboration _ _ (Track (TrackId tId) (TrackName tName) _)) = (tId, tName)
-      _ <- liftIO $ executeMany (s ^. conn) "insert into track (track_id, track_name) values (?, ?) on conflict do nothing"
-        $ (nub $ collaborationToTrackTuple <$> cs)
+      _ <- liftIO $ executeMany (s ^. conn) "insert into track (track_id, track_name) values (?, ?) on conflict do nothing" (nub $ collaborationToTrackTuple <$> cs)
 
       -- Then the collaborations
       let collaborationToTuple (Collaboration (Artist (ArtistId aId1) _) (Artist (ArtistId aId2) _) (Track (TrackId tId) _ _)) = (aId1, aId2, tId)
-      _ <- liftIO $ executeMany (s ^. conn) "insert into collaboration (first_artist_id, second_artist_id, track_id) values (?, ?, ?) on conflict do nothing"
-        $ (nub $ collaborationToTuple <$> cs)
+      _ <- liftIO $ executeMany (s ^. conn) "insert into collaboration (first_artist_id, second_artist_id, track_id) values (?, ?, ?) on conflict do nothing" (nub $ collaborationToTuple <$> cs)
       return ()
     SQ.EmptyL -> do
       -- Still need to reinstate queue state here
@@ -296,9 +319,12 @@ scraperLogger scraper = do
 scraperMain :: IO ()
 scraperMain = do
   -- DB init
-  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
-                                     , connectPassword = "postgres"
-                                     }
+  conn <-
+    connect
+      defaultConnectInfo
+        { connectDatabase = "featchains",
+          connectPassword = "postgres"
+        }
 
   -- Get OAuth token
   secret <- clientSecret
@@ -311,14 +337,16 @@ scraperMain = do
   doneM <- newMVar S.empty
   seenM <- newMVar S.empty
   tokenM <- newMVar token
-  let scraper = Scraper { _queue = queueM
-                        , _collaborations = collaborationsM
-                        , _done = doneM
-                        , _seen = seenM
-                        , _secret = secret
-                        , _token = tokenM
-                        , _conn = conn
-                        }
+  let scraper =
+        Scraper
+          { _queue = queueM,
+            _collaborations = collaborationsM,
+            _done = doneM,
+            _seen = seenM,
+            _secret = secret,
+            _token = tokenM,
+            _conn = conn
+          }
 
   -- Kick off N workers
   let numWorkers = 25
@@ -327,14 +355,16 @@ scraperMain = do
   -- Block on the logger thread
   scraperLogger scraper
 
-data GraphInfo = GraphInfo { _graph :: Graph
-                           , _idToArtist :: M.Map T.Text T.Text
-                           , _artistToId :: M.Map T.Text T.Text
-                           , _idToTrack :: M.Map T.Text T.Text
-                           , _nodeFromVertex :: Vertex -> (T.Text, T.Text, [T.Text])
-                           , _vertexFromKey :: T.Text -> Maybe Vertex
-                           , _edgeLookup :: M.Map (T.Text, T.Text) [T.Text]
-                           }
+data GraphInfo = GraphInfo
+  { _graph :: Graph,
+    _idToArtist :: M.Map T.Text T.Text,
+    _artistToId :: M.Map T.Text T.Text,
+    _idToTrack :: M.Map T.Text T.Text,
+    _nodeFromVertex :: Vertex -> (T.Text, T.Text, [T.Text]),
+    _vertexFromKey :: T.Text -> Maybe Vertex,
+    _edgeLookup :: M.Map (T.Text, T.Text) [T.Text]
+  }
+
 makeLenses ''GraphInfo
 
 buildGraph :: Connection -> IO GraphInfo
@@ -342,21 +372,28 @@ buildGraph conn = do
   -- Some convenience lookups
   idToArtist <-
     M.fromList
-    <$> (query_ conn [sql| select artist_id, artist_name from artist|] :: (IO [(T.Text, T.Text)]))
+      <$> ( query_ conn $
+              [sql| select artist_id, artist_name from artist|] ::
+              (IO [(T.Text, T.Text)])
+          )
   let artistToId = M.fromList $ (\(k, v) -> (v, k)) <$> M.toList idToArtist
   idToTrack <-
     M.fromList
-    <$> (query_ conn [sql| select track_id, track_name from track|] :: (IO [(T.Text, T.Text)]))
+      <$> ( query_ conn $
+              [sql| select track_id, track_name from track|] ::
+              (IO [(T.Text, T.Text)])
+          )
 
   print "Querying..."
   rows <-
-    query_ conn
-    $ [sql| select
+    query_ conn $
+      [sql| select
               first_artist_id,
               second_artist_id,
               track_id
             from collaboration
-      |] :: (IO [(T.Text, T.Text, T.Text)])
+      |] ::
+      (IO [(T.Text, T.Text, T.Text)])
 
   print $ T.pack (show (M.size idToArtist)) <> " artists"
   print $ T.pack (show (M.size idToTrack)) <> " tracks"
@@ -370,49 +407,55 @@ buildGraph conn = do
 
   -- Convert into graph form with nodes being names, IDs being IDs
   -- Need to get a lookup map from ID to all things it's connected to
-  let rowToEdges (aId1, aId2, _) = [ (aId1, [aId2]) ]
+  let rowToEdges (aId1, aId2, _) = [(aId1, [aId2])]
       adjacencyMap = M.fromListWith (++) (concatMap rowToEdges rows)
       edgeList = (\(aId1, toIds) -> (aId1, aId1, nub toIds)) <$> M.toList adjacencyMap
       (graph, nodeFromVertex, vertexFromKey) = graphFromEdges edgeList
 
-  return $ GraphInfo { _graph = graph
-                     , _idToArtist = idToArtist
-                     , _artistToId = artistToId
-                     , _idToTrack = idToTrack
-                     , _nodeFromVertex = nodeFromVertex
-                     , _vertexFromKey = vertexFromKey
-                     , _edgeLookup = edgeLookup
-                     }
+  return $
+    GraphInfo
+      { _graph = graph,
+        _idToArtist = idToArtist,
+        _artistToId = artistToId,
+        _idToTrack = idToTrack,
+        _nodeFromVertex = nodeFromVertex,
+        _vertexFromKey = vertexFromKey,
+        _edgeLookup = edgeLookup
+      }
 
--- TODO: Make safe
 getPath :: T.Text -> T.Text -> GraphInfo -> Maybe [(ArtistName, ArtistName, [TrackName])]
 getPath a1Name a2Name g = do
   let fst3 (a, _, _) = a
-      vToId = fst3 . (g^.nodeFromVertex)
-      vToName = (flip M.lookup $ (g^.idToArtist)) . fst3 . (g^.nodeFromVertex)
-      (Just a1Id) = M.lookup a1Name (g^.artistToId)
-      (Just a2Id) = M.lookup a2Name (g^.artistToId)
-      (Just a1V) = (g^.vertexFromKey) a1Id
-      (Just a2V) = (g^.vertexFromKey) a2Id
-  case graphBfs (g^.graph) a1V a2V of
+      vToId = fst3 . (g ^. nodeFromVertex)
+      vToName = (flip M.lookup $ (g ^. idToArtist)) . fst3 . (g ^. nodeFromVertex)
+      (Just a1Id) = M.lookup a1Name (g ^. artistToId)
+      (Just a2Id) = M.lookup a2Name (g ^. artistToId)
+      (Just a1V) = (g ^. vertexFromKey) a1Id
+      (Just a2V) = (g ^. vertexFromKey) a2Id
+  case graphBfs (g ^. graph) a1V a2V of
     Nothing -> Nothing
     Just path -> do
       let aIdPath = vToId <$> path
           aIdPairs = zip aIdPath $ tail aIdPath
-          tIdPath = catMaybes $ (flip M.lookup (g^.edgeLookup)) <$> aIdPairs
+          tIdPath = catMaybes $ (flip M.lookup (g ^. edgeLookup)) <$> aIdPairs
           tNamePath :: [[T.Text]]
-          tNamePath = (fmap.fmap) (fromMaybe "" . flip M.lookup (g^.idToTrack)) tIdPath
-          aNamePath = catMaybes $ (flip M.lookup (g^.idToArtist)) <$> aIdPath
+          tNamePath = (fmap . fmap) (fromMaybe "" . flip M.lookup (g ^. idToTrack)) tIdPath
+          aNamePath = catMaybes $ (flip M.lookup (g ^. idToArtist)) <$> aIdPath
           aNamePairs :: [(T.Text, T.Text)]
           aNamePairs = zip aNamePath $ tail aNamePath
-          nameTrackPath = (\((a, b), c ) -> (ArtistName a, ArtistName b, TrackName <$> c)) <$> (zip aNamePairs tNamePath)
+          nameTrackPath =
+            (\((a, b), c) -> (ArtistName a, ArtistName b, TrackName <$> c))
+              <$> (zip aNamePairs tNamePath)
       Just nameTrackPath
 
 getGraph :: IO GraphInfo
 getGraph = do
-  conn <- connect defaultConnectInfo { connectDatabase = "featchains"
-                                     , connectPassword = "postgres"
-                                     }
+  conn <-
+    connect
+      defaultConnectInfo
+        { connectDatabase = "featchains",
+          connectPassword = "postgres"
+        }
   buildGraph conn
 
 unsafeGetGraph :: GraphInfo
@@ -420,10 +463,13 @@ unsafeGetGraph = unsafePerformIO getGraph
 
 printPath :: [(ArtistName, ArtistName, [TrackName])] -> IO ()
 printPath path = do
-  forM_ path (\((ArtistName n1), (ArtistName (n2)), ts) -> do
-                 putStrLn $ T.unpack $ n1 <> " and " <> n2 <> " collaborated on: "
-                 forM_ ts (\(TrackName tn) -> putStrLn $ T.unpack tn)
-                 putStrLn "")
+  forM_
+    path
+    ( \((ArtistName n1), (ArtistName (n2)), ts) -> do
+        putStrLn $ T.unpack $ n1 <> " and " <> n2 <> " collaborated on: "
+        forM_ ts (\(TrackName tn) -> putStrLn $ T.unpack tn)
+        putStrLn ""
+    )
 
 -- Prettyprinter for console
 pp :: GraphInfo -> String -> String -> IO ()
@@ -442,11 +488,11 @@ graphBfs graph start end = go graph end S.empty (SQ.singleton (start, []))
         ((current, path) SQ.:< queue) ->
           let newVisited = S.insert current visited
               neighbours = filter (not . (`S.member` newVisited)) (graph ! current)
-              newPath = current:path
+              newPath = current : path
               newQueue = queue SQ.>< SQ.fromList ((,newPath) <$> neighbours)
            in if current == end
-              then Just $ reverse (current:path)
-              else go graph end newVisited newQueue
+                then Just $ reverse (current : path)
+                else go graph end newVisited newQueue
         SQ.EmptyL -> Nothing
 
 main :: IO ()
