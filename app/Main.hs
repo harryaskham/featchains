@@ -130,22 +130,27 @@ instance FromJSON Artist where
 -- Get tracks for a given artist
 -- Right now returns up to 50 tracks
 -- Remixes will mess up the stats
-getArtistTracks :: Token -> Artist -> IO TrackList
+-- TODO: Move HTTP up one level of abstraction so that token handling etc are outside this context
+
+data SpotifyResponse a = Success a | BadToken
+
+getArtistTracks :: Token -> Artist -> IO (SpotifyResponse TrackList)
 getArtistTracks token artist@(Artist _ (ArtistName name)) = do
   r <- search token ("artist:" <> name) "track" 50 0
   case r ^. responseStatus . statusCode of
     -- Success - parse the body
     200 -> case decode $ r ^. responseBody of
-             Just tl -> return tl
+             Just tl -> return $ Success tl
              Nothing -> error "Invalid body"
     -- No results for query / no more songs
-    404 -> return (TrackList [])
+    404 -> return $ Success (TrackList [])
     -- Need to rate-limit, retry after a second
     429 -> do
       let waitFor = r ^. responseHeader "Retry-After"
           waitForSecs = read $ T.unpack $ E.decodeUtf8 waitFor
       threadDelay $ 1000000 * waitForSecs
       getArtistTracks token artist
+    401 -> return BadToken
     code -> do
       print $ "Unexpected status code: " <> show code
       threadDelay 1000000
@@ -164,12 +169,16 @@ data Collaboration = Collaboration Artist Artist Track deriving (Show, Eq, Ord)
 -- Gets unidirectional collaborations
 -- For songs with many people, does all-pairs
 -- Also does not assume the passed-in artist is the first artist
-getCollaborations :: Token -> Artist -> IO [Collaboration]
+
+getCollaborations :: Token -> Artist -> IO (SpotifyResponse [Collaboration])
 getCollaborations token artist = do
-  TrackList tracks <- getArtistTracks token artist
-  let getCollabs t@(Track _ _ as) = nub [Collaboration x y t | x <- as, y <- as]
-      collabs = concatMap getCollabs tracks
-  return $ filter (\(Collaboration a1 a2 _) -> a1 /= a2) collabs
+  r <- getArtistTracks token artist
+  case r of
+    (Success (TrackList tl)) -> do
+      let getCollabs t@(Track _ _ as) = nub [Collaboration x y t | x <- as, y <- as]
+          collabs = concatMap getCollabs tl
+      return $ Success $ filter (\(Collaboration a1 a2 _) -> a1 /= a2) collabs
+    BadToken -> return BadToken
 
 getCollaborators :: Collaboration -> [Artist]
 getCollaborators (Collaboration a1 a2 _) = [a1, a2]
@@ -178,7 +187,8 @@ data Scraper = Scraper { _queue :: MVar (SQ.Seq Artist)
                        , _collaborations :: MVar (SQ.Seq Collaboration)
                        , _done :: MVar (S.Set Artist)
                        , _seen :: MVar (S.Set Artist)
-                       , _token :: Token
+                       , _secret :: T.Text
+                       , _token :: MVar Token
                        , _conn :: Connection
                        }
 makeLenses ''Scraper
@@ -191,6 +201,8 @@ stepScraper = do
   doneM <- gets (view done)
   seenM <- gets (view seen)
   collaborationsM <- gets (view collaborations)
+  tokenM <- gets (view token)
+  secret <- gets (view secret)
 
   -- Block for access to the queue
   q <- liftIO $ takeMVar qM
@@ -202,8 +214,19 @@ stepScraper = do
       -- This is what enables multiple workers to do IO at same time
       liftIO $ putMVar qM q
 
-      -- Pull all collaborative tracks for this artist
-      cs <- liftIO $ getCollaborations (s ^. token) a
+      -- Pull all collaborative tracks for this artist using the current token
+      -- If the token is expired, we get a new one
+      token <- liftIO $ readMVar tokenM
+      cs' <- liftIO $ getCollaborations token a
+      cs <- case cs' of
+        Success cs -> return cs
+        BadToken -> do
+          newToken <- liftIO $ getToken secret
+          _ <- liftIO $ takeMVar tokenM -- flush it
+          liftIO $ putMVar tokenM newToken
+          -- Hackily assume the new token just fixed life:
+          Success cs <- liftIO $ getCollaborations newToken a
+          return cs
 
       -- Track that we scraped this artist, locking on done
       done <- liftIO $ takeMVar doneM
@@ -289,11 +312,13 @@ scraperMain = do
   collaborationsM <- newMVar SQ.empty
   doneM <- newMVar S.empty
   seenM <- newMVar S.empty
+  tokenM <- newMVar token
   let scraper = Scraper { _queue = queueM
                         , _collaborations = collaborationsM
                         , _done = doneM
                         , _seen = seenM
-                        , _token = token
+                        , _secret = secret
+                        , _token = tokenM
                         , _conn = conn
                         }
 

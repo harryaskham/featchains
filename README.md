@@ -12,10 +12,3 @@ Typical output:
 
 - postgresql set up with local DB "featchains"
 - API secret stored in file in root dir called "secret"
-
-## Next Steps
-
-- More scraping, larger dataset
-- Track whether we scraped an artist
-- Scrape more than 50 songs per artist
-- Resume scraping state
