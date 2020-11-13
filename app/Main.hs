@@ -394,6 +394,7 @@ buildGraph conn = do
               second_artist_id,
               track_id
             from collaboration
+            limit 3000000
       |] ::
       (IO [(T.Text, T.Text, T.Text)])
 
