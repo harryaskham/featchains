@@ -16,6 +16,7 @@ import Control.Concurrent.MVar
     readMVar,
     takeMVar,
   )
+import Control.Exception
 import Control.Lens
   ( makeLenses,
     over,
@@ -31,6 +32,7 @@ import Control.Monad.State
     MonadState (get),
     StateT (runStateT),
     evalStateT,
+    forever,
     gets,
   )
 import Data.Aeson (FromJSON (parseJSON), decode, withObject, (.:))
@@ -495,5 +497,18 @@ graphBfs graph start end = go graph end S.empty (SQ.singleton (start, []))
                 else go graph end newVisited newQueue
         SQ.EmptyL -> Nothing
 
+interactiveMode :: IO ()
+interactiveMode = do
+  g <- getGraph
+  forever $ do
+    putStrLn "Artist 1: "
+    a1 <- getLine
+    putStrLn "Artist 2: "
+    a2 <- getLine
+    putStrLn "Finding route..."
+    catch (pp g a1 a2) (\e -> print (e :: SomeException))
+
 main :: IO ()
-main = scraperMain
+main = do
+  --scraperMain
+  interactiveMode
