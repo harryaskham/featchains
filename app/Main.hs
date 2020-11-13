@@ -285,8 +285,6 @@ logScraper = do
 runScraper :: StateT Scraper IO ()
 runScraper = do
   stepScraper
-  -- Artificial delay to avoid getting so rate-limited
-  -- liftIO $ threadDelay 200000
   runScraper
 
 scraperLogger :: Scraper -> IO ()
@@ -323,7 +321,8 @@ scraperMain = do
                         }
 
   -- Kick off N workers
-  replicateM_ 8 $ forkIO $ evalStateT runScraper scraper
+  let numWorkers = 25
+  replicateM_ numWorkers $ forkIO $ evalStateT runScraper scraper
 
   -- Block on the logger thread
   scraperLogger scraper
